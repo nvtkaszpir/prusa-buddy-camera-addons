@@ -1,0 +1,9 @@
+# Top-level navigation order (mkdocs-awesome-nav). Sections not listed here are
+# inserted by the "*" glob in the default alphabetical order; findings/ is always last.
+nav:
+  - index.md
+  - install
+  - features
+  - glob: "*"
+    ignore_no_matches: true
+  - findings

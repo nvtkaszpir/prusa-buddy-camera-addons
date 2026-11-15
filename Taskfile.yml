@@ -1,0 +1,213 @@
+version: '3'
+
+vars:
+  MKDOCS_VERSION: 1.6.1
+  MKDOCS_MATERIAL_VERSION: 9.8.0
+  TRULY_SANE_LISTS_VERSION: 1.3
+  AWESOME_NAV_VERSION: 3.3.0
+  MKDOCS: >-
+    uvx --from mkdocs=={{.MKDOCS_VERSION}}
+    --with mkdocs-material=={{.MKDOCS_MATERIAL_VERSION}}
+    --with mdx-truly-sane-lists=={{.TRULY_SANE_LISTS_VERSION}}
+    --with mkdocs-awesome-nav=={{.AWESOME_NAV_VERSION}}
+    mkdocs
+  CAMERA_HOST: '192.168.1.75'   # camera ssh target (dropbear, root)
+  # ssh client options for every task: give up connecting after 10 s; send a keepalive every 5 s and drop the
+  # connection after 3 unanswered ones, so a session ends ~15 s after the camera vanishes (reboot, power cut).
+  SSH_OPTS: '-o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3'
+  REMOTE_HOST: '192.168.1.10'   # syslog server, written into the staged rsyslog.conf
+  # Host directory for buddy:timelapse:avi / :jpg (downloads/ is gitignored).
+  TIMELAPSE_LOCAL: downloads/timelapse
+  # rsync from the camera's timelapse/ directory. -rt, not -a: vfat has no owners and every file is mode 777;
+  # --chmod gives the copies plain 644/755 modes instead.
+  # --partial keeps a half-done multi-GB video on a dropped connection, so the next run continues it.
+  # The camera has ~1-6 MB free while lp_app runs. oom_score_adj 1000 makes the kernel's OOM killer pick the
+  # camera-side rsync instead of lp_app (seen 2026-11-14: listing a 12000-photo folder got lp_app killed).
+  TIMELAPSE_RSYNC: >-
+    rsync -rtv --partial --chmod=D755,F644
+    --rsync-path='echo 1000 > /proc/self/oom_score_adj && exec /userdata/bin/rsync' -e 'ssh {{.SSH_OPTS}}'
+  # buddy:timelapse:mp4: FFMPEG, an ffmpeg with libx264. Empty (default): the first of ffmpeg on PATH,
+  # /usr/bin/ffmpeg, /usr/local/bin/ffmpeg that has libx264. It may also be a command, e.g. "docker run --rm
+  # -u $(id -u):$(id -g) -v $PWD:$PWD -w $PWD --entrypoint ffmpeg linuxserver/ffmpeg:8.0.1". The frame rate
+  # defaults to the camera AVI's 10 fps; lower CRF = better, bigger. TIMELAPSE_JOB limits the task to one job.
+  FFMPEG: ''
+  TIMELAPSE_FPS: 10
+  TIMELAPSE_CRF: 23
+  TIMELAPSE_PRESET: medium
+  TIMELAPSE_JOB: ''
+  # Public keys staged as authorized_keys (default: every ~/.ssh/*.pub); buddy:sync makes this the camera's
+  # complete key list on the next boot.
+  SSH_PUBKEYS: '$HOME/.ssh/*.pub'
+  BUDDY_STAGE: buddy-addons/build/device-stage
+
+tasks:
+  docs:serve:
+    desc: Serve the docs/ site with live reload (http://127.0.0.1:8000)
+    cmds:
+      - '{{.MKDOCS}} serve --dev-addr {{.ADDR | default "127.0.0.1:8000"}}'
+
+  docs:build:
+    desc: Build static HTML docs from docs/ into site/
+    cmds:
+      - '{{.MKDOCS}} build --strict'
+
+  buddy:stage:
+    desc: Stage the deployment payload in buddy-addons/build/device-stage (device/ scripts with the rsyslog target set to REMOTE_HOST, authorized_keys from SSH_PUBKEYS, plus out/ntpsync, out/fsck.fat, out/logrotate and the out/rsyslog/ bundle; repo template untouched)
+    cmds:
+      - rm -rf {{.BUDDY_STAGE}}
+      - mkdir -p {{.BUDDY_STAGE}}
+      - cp -r buddy-addons/device/. {{.BUDDY_STAGE}}/
+      - cp buddy-addons/out/ntpsync buddy-addons/out/fsck.fat buddy-addons/out/logrotate {{.BUDDY_STAGE}}/
+      - cp -r buddy-addons/out/rsyslog {{.BUDDY_STAGE}}/
+      - sed -i 's/^\( *target=\)"REMOTE_HOST"/\1"{{.REMOTE_HOST}}"/' {{.BUDDY_STAGE}}/rsyslog.conf
+      - grep -q '^ *target="{{.REMOTE_HOST}}"' {{.BUDDY_STAGE}}/rsyslog.conf
+      - "test \"$(grep -v '^ *#' {{.BUDDY_STAGE}}/rsyslog.conf | grep -c REMOTE_HOST)\" = 0"
+      # awk 1 ends every file with a newline, so a .pub without one cannot swallow the next key.
+      - awk 1 {{.SSH_PUBKEYS}} > {{.BUDDY_STAGE}}/authorized_keys
+      # Reject private keys and any line that is not a valid public key.
+      - "! grep -q 'PRIVATE KEY' {{.BUDDY_STAGE}}/authorized_keys"
+      - "test \"$(ssh-keygen -lf {{.BUDDY_STAGE}}/authorized_keys | wc -l)\" = \"$(grep -c -v -e '^ *$' -e '^ *#' {{.BUDDY_STAGE}}/authorized_keys)\""
+
+  buddy:sync:
+    desc: Stage, then rsync the payload (including authorized_keys from SSH_PUBKEYS) to the camera's microSD bin/ over ssh (CAMERA_HOST, dropbear). Dropbear, lighttpd, rsync and drill binaries are NOT included; install them by hand as the README describes
+    deps:
+      - buddy:stage
+    cmds:
+      - "rsync -av --no-owner --no-group --exclude='*-hook.sh' --rsync-path=/userdata/bin/rsync -e 'ssh {{.SSH_OPTS}}' {{.BUDDY_STAGE}}/ root@{{.CAMERA_HOST}}:/mnt/sdcard/bin/"
+
+  buddy:install:
+    desc: Stage, then copy the payload to a microSD card mounted on this host (SDCARD=mount point, required) - bin/ gets the staged files plus out/dropbearmulti, rsync, drill, lighttpd, mbedtls-* and secrets/htpasswd when present. The boot hook lp_app.sh is not touched; add it as docs/install/3-installation.md describes
+    requires:
+      vars: [SDCARD]
+    preconditions:
+      # findmnt --mountpoint matches only the mount point itself, not a directory inside a mount.
+      - sh: 'findmnt -rn --mountpoint "{{.SDCARD}}" > /dev/null'
+        msg: '{{.SDCARD}} is not a mount point. Mount the microSD card and pass its mount point, e.g. SDCARD=/run/media/$USER/SDCARD'
+      - sh: 'test "$(findmnt -rn -o FSTYPE --mountpoint "{{.SDCARD}}")" = vfat'
+        msg: '{{.SDCARD}} is not a vfat filesystem; the camera mounts its card as vfat. Wrong path?'
+      - sh: 'test -w "{{.SDCARD}}"'
+        msg: '{{.SDCARD}} is not writable (read-only mount or wrong owner)'
+    cmds:
+      - task: buddy:stage
+      - mkdir -p "{{.SDCARD}}/bin" "{{.SDCARD}}/logs"
+      - rsync -r --exclude='*-hook.sh' {{.BUDDY_STAGE}}/ "{{.SDCARD}}/bin/"
+      - |
+        for f in dropbearmulti rsync drill lighttpd mbedtls-gen-key mbedtls-cert-write; do
+          if [ -f "buddy-addons/out/$f" ]; then
+            cp "buddy-addons/out/$f" "{{.SDCARD}}/bin/$f"
+          else
+            echo "skipped $f: no buddy-addons/out/$f (build it to use its feature)"
+          fi
+        done
+      - |
+        if [ -f buddy-addons/secrets/htpasswd ]; then
+          cp buddy-addons/secrets/htpasswd "{{.SDCARD}}/bin/htpasswd"
+        else
+          echo "skipped htpasswd: no buddy-addons/secrets/htpasswd (task buddy:htpasswd); only needed when lighttpd.conf turns basic auth on"
+        fi
+      - sync
+      - |
+        if [ ! -f "{{.SDCARD}}/lp_app.sh" ]; then
+          echo "NOTE: no lp_app.sh on the card yet; nothing starts the add-ons. See docs/install/3-installation.md"
+        fi
+
+  buddy:uninstall:
+    desc: Remove the add-ons from the camera over ssh (CAMERA_HOST), then reboot it with the microSD card cleanly unmounted (safe-reboot.sh); ssh is gone afterwards. Options after "--" go to buddy-addons/device/uninstall.sh, e.g. "task buddy:uninstall -- --stock --hosts"; "task buddy:uninstall -- -n" is a dry run (no changes, no reboot)
+    cmds:
+      # Copied to /tmp first: "sh -s" would read the script from the ssh channel while it runs, and
+      # uninstall.sh deletes the card copies.
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/uninstall.sh' < buddy-addons/device/uninstall.sh"
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/safe-reboot.sh' < buddy-addons/device/safe-reboot.sh"
+      # One session: uninstall.sh stops the dropbear listener, so a second login would fail.
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'sh /tmp/uninstall.sh {{.CLI_ARGS}}; rc=$?; case \" {{.CLI_ARGS}} \" in *\" -n \"*) sh /tmp/safe-reboot.sh -n ;; *) sh /tmp/safe-reboot.sh ;; esac; exit $rc'"
+
+  buddy:htpasswd:
+    desc: Add or change a lighttpd basic-auth user in buddy-addons/secrets/htpasswd; asks for the user name (unless HTPASSWD_USER is set) and the password twice
+    silent: true
+    interactive: true
+    cmds:
+      - |
+        user="{{.HTPASSWD_USER}}"
+        if [ -z "$user" ]; then
+          printf 'htpasswd user: '
+          read -r user
+        fi
+        buddy-addons/gen-htpasswd.sh "$user"
+
+  buddy:reboot:
+    desc: Reboot the camera over ssh (CAMERA_HOST) with the microSD card cleanly unmounted - buddy-addons/device/safe-reboot.sh stops sync_loop.sh, lp_app and everything else using the card, unmounts it, then runs "reboot -f" (plain reboot does not restart it). "task buddy:reboot -- -n" lists what it would stop
+    cmds:
+      # Copied to /tmp: the script unmounts the card, so it cannot run from there.
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/safe-reboot.sh' < buddy-addons/device/safe-reboot.sh"
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'sh /tmp/safe-reboot.sh {{.CLI_ARGS}}'"
+
+  buddy:timelapse:avi:
+    desc: Copy the timelapse videos (/mnt/sdcard/timelapse/*.avi) from the camera to TIMELAPSE_LOCAL (default downloads/timelapse) with rsync over ssh. Unchanged files are skipped; a video still being recorded is copied as it is now and updated on the next run. Extra rsync options after "--", e.g. "-- -n" for a dry run
+    cmds:
+      - mkdir -p "{{.TIMELAPSE_LOCAL}}"
+      # Videos sit at the top level; --exclude='*' also skips the photo folders. CLI_ARGS go first, so an
+      # extra --exclude (e.g. of the video being recorded) wins over --include: rsync uses the first match.
+      - "{{.TIMELAPSE_RSYNC}} {{.CLI_ARGS}} --include='*.avi' --exclude='*' root@{{.CAMERA_HOST}}:/mnt/sdcard/timelapse/ \"{{.TIMELAPSE_LOCAL}}/\""
+
+  buddy:timelapse:jpg:
+    desc: Copy the timelapse photos (/mnt/sdcard/timelapse/<job>/<YYYYMMDD>/*.jpg) from the camera to TIMELAPSE_LOCAL (default downloads/timelapse), keeping the folder layout, with rsync over ssh. Unchanged files are skipped. Extra rsync options after "--", e.g. "-- -n" for a dry run
+    cmds:
+      - mkdir -p "{{.TIMELAPSE_LOCAL}}"
+      # No -m (--prune-empty-dirs): it turns off incremental recursion, so the camera's rsync would first list
+      # and stat every photo on the card (minutes on vfat, all in its few MB of free RAM) before sending any.
+      # Empty folders are pruned on the host instead. CLI_ARGS first, as above.
+      - "{{.TIMELAPSE_RSYNC}} {{.CLI_ARGS}} --include='*/' --include='*.jpg' --exclude='*' root@{{.CAMERA_HOST}}:/mnt/sdcard/timelapse/ \"{{.TIMELAPSE_LOCAL}}/\""
+      - find "{{.TIMELAPSE_LOCAL}}" -mindepth 1 -type d -empty -delete
+
+  buddy:timelapse:mp4:
+    desc: Make an H.264 MP4 per timelapse job from the downloaded photos (TIMELAPSE_LOCAL/<job>/<YYYYMMDD>/*.jpg, see buddy:timelapse:jpg) -> TIMELAPSE_LOCAL/<job>.mp4, with ffmpeg + libx264 on this host. Photos in name order (day folder, then time), TIMELAPSE_FPS frames per second (default 10). Only jobs without an MP4 are done; an existing <job>.mp4 is never overwritten (delete it to rebuild). TIMELAPSE_JOB=<job> does only that job; extra ffmpeg output options after "--", e.g. "-- -vf scale=1280:-2"
+    # The loop below is long; print its messages, not the script.
+    silent: true
+    vars:
+      # An explicit FFMPEG wins; otherwise probe the usual places. Prints "ffmpeg" when none has libx264, so the
+      # precondition below fails with its message.
+      FFMPEG_BIN:
+        sh: |
+          if [ -n "{{.FFMPEG}}" ]; then echo "{{.FFMPEG}}"; exit 0; fi
+          for f in ffmpeg /usr/bin/ffmpeg /usr/local/bin/ffmpeg; do
+            "$f" -hide_banner -encoders 2>/dev/null | grep -q " libx264 " && { echo "$f"; exit 0; }
+          done
+          echo ffmpeg
+    preconditions:
+      - sh: '{{.FFMPEG_BIN}} -hide_banner -encoders 2>/dev/null | grep -q " libx264 "'
+        msg: 'no ffmpeg with the libx264 encoder found ({{.FFMPEG_BIN}}). Install one, or set FFMPEG to one that has it, e.g. the docker image named in Taskfile.yml'
+      - sh: 'test -d "{{.TIMELAPSE_LOCAL}}"'
+        msg: 'no {{.TIMELAPSE_LOCAL}}; download the photos first with task buddy:timelapse:jpg'
+    cmds:
+      - |
+        made=0
+        for d in "{{.TIMELAPSE_LOCAL}}"/*/; do
+          [ -d "$d" ] || continue
+          job=$(basename "$d")
+          [ -z "{{.TIMELAPSE_JOB}}" ] || [ "$job" = "{{.TIMELAPSE_JOB}}" ] || continue
+          # Job names from lp_app contain only A-Z a-z 0-9 - . _ , so they are safe in a glob.
+          n=$(find "$d" -mindepth 2 -maxdepth 2 -name '*.jpg' | wc -l)
+          if [ "$n" = 0 ]; then echo "$job: no photos, skipped"; continue; fi
+          out="{{.TIMELAPSE_LOCAL}}/$job.mp4"
+          # Never overwrite: an existing MP4 is kept even if more photos arrived. Delete it to rebuild.
+          if [ -e "$out" ]; then echo "$job: $out exists, skipped"; continue; fi
+          echo "$job: $n photos -> $out"
+          # glob sorts by path: day folder first, then the time in the file name. Written to a temporary
+          # file first, so an interrupted run leaves no half MP4 that would count as existing.
+          {{.FFMPEG_BIN}} -hide_banner -loglevel error -stats -y \
+            -framerate {{.TIMELAPSE_FPS}} -pattern_type glob -i "$d*/*.jpg" \
+            -c:v libx264 -preset {{.TIMELAPSE_PRESET}} -crf {{.TIMELAPSE_CRF}} -pix_fmt yuv420p \
+            -movflags +faststart {{.CLI_ARGS}} "$out.part.mp4" \
+            || { rm -f "$out.part.mp4"; echo "$job: ffmpeg failed" >&2; exit 1; }
+          mv "$out.part.mp4" "$out"
+          made=$((made + 1))
+        done
+        echo "made $made MP4 file(s)"
+
+  buddy:timelapse:clean:
+    desc: Delete the timelapses (videos and photo folders) from the camera's /mnt/sdcard/timelapse/, except the one a print is still writing (buddy-addons/device/timelapse-clean.sh). Asks first (--yes skips the question). "task buddy:timelapse:clean -- -n" lists what it would delete
+    prompt: Delete the timelapses on {{.CAMERA_HOST}} (all but the one being recorded)? Download them first with buddy:timelapse:avi / :jpg
+    cmds:
+      # Copied to /tmp, like the other device scripts run by tasks.
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/timelapse-clean.sh' < buddy-addons/device/timelapse-clean.sh"
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'sh /tmp/timelapse-clean.sh {{.CLI_ARGS}}'"

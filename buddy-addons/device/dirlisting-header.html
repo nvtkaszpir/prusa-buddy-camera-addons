@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<!-- Directory listing head for lighttpd (dir-listing.show-header). Inserted raw
+before every listing table. Edit and upload to /mnt/sdcard/bin/dirlisting-header.html,
+then run start-httpd.sh. start-httpd.sh fills in two placeholders, written as
+HOSTNAME and FQDN between @ signs: the camera's short name and its full DNS
+name (reverse DNS of its IP address; FQDN stays empty until DNS answers).
+No external files (no link/script/url()/@import): wget --mirror would fetch them. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>@HOSTNAME@</title>
+<style>
+:root{--bg:#f4f5f7;--fg:#1f2328;--card:#fff;--line:#d8dce1;--mute:#6a737d;--hi:#eef3fb;--link:#0a5bc4}
+@media (prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e4e6ea;--card:#1f2228;--line:#353a42;--mute:#959ca6;--hi:#262c36;--link:#6cb2ff}}
+body{margin:0;padding:1.5rem 1rem;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.cam{max-width:60rem;margin:0 auto .2rem;display:flex;flex-wrap:wrap;align-items:baseline;gap:.2rem .7rem}
+.cam h1{margin:0;font-size:1.6rem;font-weight:700;overflow-wrap:anywhere}
+.cam span{color:var(--mute);font-size:.95rem;overflow-wrap:anywhere}
+.cam span:empty{display:none}
+h2{max-width:60rem;margin:0 auto 1rem;font-size:1.05rem;font-weight:600;color:var(--mute);overflow-wrap:anywhere}
+.list{max-width:60rem;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);overflow:clip}
+table{width:100%;border-collapse:collapse}
+th,td{padding:.45rem .8rem;text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:var(--card);border-bottom:2px solid var(--line);font-weight:600;white-space:nowrap}
+tbody tr+tr td{border-top:1px solid var(--line)}
+tbody tr:hover{background:var(--hi)}
+a{color:var(--link);text-decoration:none}
+a:hover{text-decoration:underline}
+td.n{overflow-wrap:anywhere;word-break:break-word}
+tr.d td.n{font-weight:600}
+tr.d td.n a::before{content:"\1F4C1\00A0";font-weight:400}
+td.m,td.s{font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+.s{text-align:right}
+td.t{color:var(--mute);font-size:13px;max-width:12rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (max-width:640px){body{padding:1rem .5rem}.t{display:none}th,td{padding:.4rem .5rem}}
+</style>
+</head>
+<body>
+<header class="cam"><h1>@HOSTNAME@</h1><span>@FQDN@</span></header>

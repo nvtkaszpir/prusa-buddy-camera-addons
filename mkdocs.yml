@@ -1,0 +1,42 @@
+site_name: Prusa Buddy3D camera addons
+site_description: Additional software to improve useability of the Prusa Buddy3D camera that ships with Core One L
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  # Section order comes from docs/.nav.yml (Findings last).
+  - awesome-nav
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  # Treat 2-space indentation as one nesting level, like GitHub/CommonMark,
+  # so nested lists in docs/ render nested instead of flattened.
+  - mdx_truly_sane_lists:
+      nested_indent: 2
