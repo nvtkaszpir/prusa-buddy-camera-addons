@@ -1,8 +1,16 @@
 # Prusa Buddy3D camera add-ons
 
-Add-ons for the Buddy3D camera that ships with the Prusa CORE One L: SSH access (dropbear), an HTTP file server
-for timelapse downloads (lighttpd), rsync, remote syslog (rsyslog), log rotation, time sync and a microSD card
-check (fsck.fat). Tested with camera firmware cam-3.1.3.
+Add-ons for the Buddy3D camera that ships with the Prusa CORE One L:
+
+- SSH access (dropbear),
+- an HTTP file server for timelapse downloads (lighttpd),
+- rsync,
+- remote syslog (rsyslog),
+- log rotation,
+- time sync
+- a microSD card check (fsck.fat)
+
+Tested with camera firmware cam-3.1.3.
 
 Documentation: <https://nvtkaszpir.github.io/prusa-buddy-camera-addons/> (built from [`docs/`](docs/)).
 
