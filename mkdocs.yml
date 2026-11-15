@@ -1,5 +1,7 @@
 site_name: Prusa Buddy3D camera addons
 site_description: Additional software to improve useability of the Prusa Buddy3D camera that ships with Core One L
+repo_url: https://github.com/nvtkaszpir/prusa-buddy-camera-addons
+repo_name: nvtkaszpir/prusa-buddy-camera-addons
 docs_dir: docs
 site_dir: site
 
