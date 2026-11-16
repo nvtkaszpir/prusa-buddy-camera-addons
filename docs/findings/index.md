@@ -26,6 +26,8 @@ Each page documents one file from `/oem/usr/bin` or `/oem/usr/sbin`. The source 
   and nothing on the camera uses it.
 - [Swap](swap.md): the kernel is built without swap support, so neither a swapfile on the microSD card, a swap
   partition nor zram can work on the stock firmware (checked up to 3.1.6).
+- [Video memory](video-memory.md): how the 64 MB of RAM is split, and what the 24 MB reserved for video buffers
+  holds (23.2 MB used by `lp_app`'s 1080p30 pipeline, so it cannot simply be made smaller).
 
 ## Used on the camera
 
