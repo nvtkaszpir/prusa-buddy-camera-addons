@@ -68,6 +68,78 @@ written locally. Before this add-on the camera had no syslog daemon, so `syslog(
   wiped by a firmware update. The start script copies it from the card again. `/tmp/rsyslogd.pid`,
   `/tmp/rsyslogd.log` and the waiter files do not survive a reboot.
 
+## Built-in lp_app syslog (3.1.6+) vs this add-on
+
+Measured on 2026-11-22 on firmware 3.1.6. The built-in forwarding was tested by writing `/mnt/sdcard/syslog_srv`
+with `IP=192.168.1.35` and `PORT=5514`, restarting lp_app and capturing UDP on the host. The file was removed
+afterwards.
+
+How the built-in one is turned on:
+
+- `/mnt/sdcard/syslog_srv` with the lines `IP=<IPv4 address>` and `PORT=<port>` (default 514). lp_app reads it
+  once, when it starts. Its log then shows
+  `Syslog Channel added to Logger. IP: ..., Port: ..., Source: Buddy3D Camera`. Without the file it logs
+  `No valid remote Syslog server config found on SD card, skip adding NetworkSyslogChannel`.
+- On 3.1.7 the keys `SYSLOG_IP` and `SYSLOG_PORT` in `/mnt/sdcard/srv_cfg.txt` take precedence, and `syslog_srv`
+  stays as a fallback. 3.1.7 also accepts a `*.local` name. See [3.1.7 changes](../findings/cam-3.1.7-diff.md).
+
+What arrives: RFC 5424 over UDP, for example
+
+```text
+<13>1 2026-11-22T15:56:05.119+01:00 Buddy3D Camera lp_app 1793 - - main.cpp:80 main | Firmware version: 3.1.6
+```
+
+- Timestamps have milliseconds and the local offset (`+01:00`, from `/etc/TZ`).
+- The severity is shifted by one level. Counted over 95 s:
+
+  | lp_app level | syslog severity | lines on the server | lines in the card log |
+  |---|---|---|---|
+  | `E` | `<11>` err | 12 | |
+  | `W` | `<12>` warning | 17 | |
+  | `I` | `<13>` notice | 243 | 238 |
+  | `D` | `<14>` info | 63 | 61 |
+
+- About 335 messages in 95 s, about 72 bytes per line, against 328 lines that lp_app wrote to its card log in the
+  same window: no loss was seen on the LAN. A multi-line log entry arrives as one message with embedded newlines.
+- The HOSTNAME field is the camera name from `/userdata/xhr_config.ini` (`camera_name=Buddy3D Camera`). It
+  contains a space, which RFC 5424 does not allow, so a parser reads HOSTNAME=`Buddy3D`, APP-NAME=`Camera`,
+  PROCID=`lp_app` and MSGID=`1793`. Renaming the camera to a name without spaces avoids it [INFERENCE: the field
+  is that config value].
+
+Comparison, built-in lp_app syslog first, then this add-on:
+
+- Forwards: only lp_app's own lines. The add-on sends lp_app's logs (imfile, from the card files), the kernel log
+  (imklog), dropbear, lighttpd and anything else on `/dev/log`.
+- Transport: UDP only, to a numeric IPv4 address (3.1.7: also a `*.local` name). The add-on uses UDP or TCP, as
+  set in `rsyslog.conf`.
+- Network or server down: the lines are lost, also those logged at boot before Wi-Fi is up [INFERENCE]. With the
+  add-on the lines stay in the card files and are read once rsyslogd runs.
+- Start: with lp_app. The add-on starts after its readiness gate (station address, `ntpsync`): 68 s after
+  boot in the measured boot with the waiter's ntpd restarts (about 12 min with the old kernel-only `ntpsync`
+  check).
+- Format: RFC 5424 with the severity shifted by one level. The add-on uses rsyslog templates, configurable.
+- Parsing: the host name with a space breaks the fields. No such issue with the add-on.
+- Cost: nothing extra, it is part of the firmware. The add-on's rsyslogd uses about 1 MB RSS (VmHWM about 2 MB,
+  measured; lp_app 13 MB) plus the bundle on the card, and it needs lp_app's `--log2file` card logs (about 20 MB
+  of writes per day).
+- Firmware updates: both survive them. The built-in one is a firmware feature with its config file on the card;
+  the add-on lives on the card and in `/userdata`.
+
+Recommendation: keep this add-on. It loses nothing during Wi-Fi drops, it also forwards the kernel, ssh and web
+server logs, and 1 MB of RAM is affordable on 3.1.6. Use the built-in one only if lp_app's lines are enough and
+you want to drop the `--log2file` card writes; then rename the camera to a name without spaces. Never use both,
+or each lp_app line arrives twice (the note in `rsyslog.conf` says the same). The add-on enforces that: while its
+hook block runs, `start-rsyslog.sh` disables `syslog_srv` and the `SYSLOG_*` keys of `srv_cfg.txt` on every boot
+(see [How it works](#how-it-works)).
+
+To switch to the built-in forwarding, either uninstall the add-on (`uninstall.sh` restores both files), or remove
+the rsyslog hook block from `/mnt/sdcard/lp_app.sh`, restore the files by hand and restart lp_app or reboot:
+
+```sh
+mv /mnt/sdcard/syslog_srv.disabled /mnt/sdcard/syslog_srv
+sed -i 's/^# disabled by start-rsyslog.sh: //' /mnt/sdcard/srv_cfg.txt   # 3.1.7+
+```
+
 ## What to change
 
 !!! warning "Mandatory: set the syslog server"
