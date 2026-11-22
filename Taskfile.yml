@@ -39,6 +39,10 @@ vars:
   # complete key list on the next boot.
   SSH_PUBKEYS: '$HOME/.ssh/*.pub'
   BUDDY_STAGE: buddy-addons/build/device-stage
+  # buddy:firmware:*: OTA server and the firmware version to put on the card as cus_update_ota.tar (FW_VERSION
+  # is required by those tasks, e.g. FW_VERSION=3.1.6). Staging server: connect-ota-staging.prusa3d.com.
+  OTA_HOST: connect-ota.prusa3d.com
+  FW_VERSION: ''
 
 tasks:
   docs:serve:
@@ -135,7 +139,7 @@ tasks:
         buddy-addons/gen-htpasswd.sh "$user"
 
   buddy:reboot:
-    desc: Reboot the camera over ssh (CAMERA_HOST) with the microSD card cleanly unmounted - buddy-addons/device/safe-reboot.sh stops sync_loop.sh, lp_app and everything else using the card, unmounts it, then runs "reboot -f" (plain reboot does not restart it). "task buddy:reboot -- -n" lists what it would stop
+    desc: Reboot the camera over ssh (CAMERA_HOST) with the microSD card cleanly unmounted - buddy-addons/device/safe-reboot.sh stops sync_loop.sh, lp_app and everything else using the card, unmounts it, then runs "reboot -f" (plain reboot does nothing while the card hook /mnt/sdcard/lp_app.sh runs its last command in the foreground, and even with a backgrounded one leaves the card not cleanly unmounted). "task buddy:reboot -- -n" lists what it would stop
     cmds:
       # Copied to /tmp: the script unmounts the card, so it cannot run from there.
       - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/safe-reboot.sh' < buddy-addons/device/safe-reboot.sh"
@@ -211,3 +215,162 @@ tasks:
       # Copied to /tmp, like the other device scripts run by tasks.
       - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat > /tmp/timelapse-clean.sh' < buddy-addons/device/timelapse-clean.sh"
       - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'sh /tmp/timelapse-clean.sh {{.CLI_ARGS}}'"
+
+  buddy:firmware:download:
+    desc: Download the camera firmware package https://OTA_HOST/file/cam-FW_VERSION.tar (FW_VERSION required, e.g. FW_VERSION=3.1.6; OTA_HOST default connect-ota.prusa3d.com, staging is connect-ota-staging.prusa3d.com) to firmware_images/cam-FW_VERSION.tar; skipped when the file exists. Checks the SHA-1 when the server publishes it for this version (only for its latest one) and that the file is an OTA tar with RK_OTA_update.sh
+    requires:
+      vars: [FW_VERSION]
+    preconditions:
+      # Checked before FW_VERSION goes into a URL and a file name.
+      - sh: 'echo "{{.FW_VERSION}}" | grep -Eqx "[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?"'
+        msg: 'FW_VERSION={{.FW_VERSION}} does not look like a firmware version (N.N.N, optionally with a suffix such as -rc1), e.g. FW_VERSION=3.1.6'
+      - sh: 'command -v curl > /dev/null'
+        msg: 'curl is not installed'
+    cmds:
+      - |
+        file="firmware_images/cam-{{.FW_VERSION}}.tar"
+        url="https://{{.OTA_HOST}}/file/cam-{{.FW_VERSION}}.tar"
+        mkdir -p firmware_images || exit 1
+        if [ -f "$file" ]; then
+          echo "$file exists, not downloading it again (delete it to download it again)"
+        else
+          echo "downloading $url"
+          # Into a .part file first, so an interrupted download never looks like a finished package.
+          # -f: an HTTP error (404 for a version the server does not have) fails instead of saving the error page.
+          if ! curl -fL -o "$file.part" "$url"; then
+            rm -f "$file.part"
+            echo "download of $url failed; does {{.OTA_HOST}} have version {{.FW_VERSION}}? (staging: OTA_HOST=connect-ota-staging.prusa3d.com)" >&2
+            exit 1
+          fi
+          mv "$file.part" "$file" || exit 1
+        fi
+        sha1=$(sha1sum "$file" | cut -d' ' -f1)
+        # The update answer lp_app gets: {"last_version": ..., "sha1sum": ..., "file": ...}, for the newest
+        # version only. jq when present; sed otherwise (keys and string values on one line).
+        api="https://{{.OTA_HOST}}/api/niceboy/v1/camera"
+        json=$(curl -fsSL "$api" 2>/dev/null) || json=''
+        if command -v jq > /dev/null; then
+          last=$(printf '%s' "$json" | jq -r '.last_version // empty' 2>/dev/null) || last=''
+          sum=$(printf '%s' "$json" | jq -r '.sha1sum // empty' 2>/dev/null) || sum=''
+        else
+          last=$(printf '%s' "$json" | sed -n 's/.*"last_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+          sum=$(printf '%s' "$json" | sed -n 's/.*"sha1sum"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+        fi
+        sum=$(printf '%s' "$sum" | tr 'A-F' 'a-f')
+        if [ "$last" = "{{.FW_VERSION}}" ] && [ -n "$sum" ]; then
+          if [ "$sha1" != "$sum" ]; then
+            echo "SHA-1 mismatch for $file: $sha1, {{.OTA_HOST}} says $sum. Delete the file and download it again" >&2
+            exit 1
+          fi
+          echo "SHA-1 OK: $sha1 (as published by {{.OTA_HOST}})"
+        else
+          echo "SHA-1 $sha1 not checked: {{.OTA_HOST}} publishes a checksum only for its latest version (now: ${last:-unknown})"
+        fi
+        # An OTA package is a plain tar whose RK_OTA_update.sh the recovery system runs.
+        list=$(tar -tf "$file") || { echo "$file is not a valid tar; delete it and download it again" >&2; exit 1; }
+        if ! printf '%s\n' "$list" | grep -Eq '(^|/)RK_OTA_update\.sh$'; then
+          echo "$file has no RK_OTA_update.sh; not a camera OTA package" >&2
+          exit 1
+        fi
+        echo "$file: camera firmware {{.FW_VERSION}}"
+
+  buddy:firmware:upload:
+    desc: Download firmware FW_VERSION (buddy:firmware:download, FW_VERSION required) and put it on the camera's microSD card over ssh (CAMERA_HOST) as /mnt/sdcard/cus_update_ota.tar, which the camera flashes on its next boot. Does not reboot; run "task buddy:reboot" afterwards. The update rewrites boot, rootfs and oem; /userdata and the card are kept. The card hook /mnt/sdcard/lp_app.sh must start its last command in the background ("... &"), otherwise the camera's "reboot recovery" waits until that process exits (warned about here; see docs/install/firmware-update.md)
+    requires:
+      vars: [FW_VERSION]
+    preconditions:
+      - sh: 'echo "{{.FW_VERSION}}" | grep -Eqx "[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?"'
+        msg: 'FW_VERSION={{.FW_VERSION}} does not look like a firmware version (N.N.N, optionally with a suffix such as -rc1), e.g. FW_VERSION=3.1.6'
+    cmds:
+      - task: buddy:firmware:download
+        vars:
+          FW_VERSION: '{{.FW_VERSION}}'
+          OTA_HOST: '{{.OTA_HOST}}'
+      # The recovery system prefers fac_update_ota.tar over cus_update_ota.tar and never deletes it.
+      - |
+        fac=$(ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'if [ -e /mnt/sdcard/fac_update_ota.tar ]; then echo yes; fi') || exit 1
+        if [ "$fac" = yes ]; then
+          echo "WARNING: /mnt/sdcard/fac_update_ota.tar exists on the camera. Recovery flashes it instead of cus_update_ota.tar and never deletes it, so the camera flashes it on every boot; remove it first" >&2
+        fi
+      # busybox init acts on the "reboot recovery" the boot script runs only after rcS returns, and rcS waits for
+      # the card hook. A hook whose last line runs in the foreground (sync_loop.sh, lp_app) never returns, so the
+      # update would start only when that process exits. Warn only: the hook is the owner's file.
+      - |
+        hook=$(ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'cat /mnt/sdcard/lp_app.sh 2>/dev/null') || hook=''
+        last=$(printf '%s\n' "$hook" | awk '!/^[[:space:]]*(#|$)/ { l = $0 } END { print l }' \
+          | sed -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//')
+        if [ -n "$last" ] && [ "${last%&}" = "$last" ]; then
+          echo "WARNING: the last command of /mnt/sdcard/lp_app.sh on the camera does not run in the background:" >&2
+          echo "  $last" >&2
+          echo "The camera's \"reboot recovery\" waits until it exits, so the update would not start on boot. End it" >&2
+          echo "with \" &\" (e.g. \"/tmp/sync_loop.sh &\"); see docs/install/firmware-update.md" >&2
+        fi
+      # To a .part name first: the camera's boot script starts recovery as soon as cus_update_ota.tar exists, so
+      # it must only appear complete. --partial keeps a half copy for the next run. oom_score_adj as in
+      # TIMELAPSE_RSYNC: the camera has only a few MB free while lp_app runs.
+      - "rsync -v --progress --partial --rsync-path='echo 1000 > /proc/self/oom_score_adj && exec /userdata/bin/rsync' -e 'ssh {{.SSH_OPTS}}' firmware_images/cam-{{.FW_VERSION}}.tar root@{{.CAMERA_HOST}}:/mnt/sdcard/cus_update_ota.tar.part"
+      # md5, not SHA-1: the camera's BusyBox has md5sum but no sha1sum.
+      - |
+        local_md5=$(md5sum "firmware_images/cam-{{.FW_VERSION}}.tar" | cut -d' ' -f1)
+        remote_md5=$(ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'md5sum /mnt/sdcard/cus_update_ota.tar.part' | cut -d' ' -f1)
+        if [ -z "$remote_md5" ] || [ "$local_md5" != "$remote_md5" ]; then
+          ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'rm -f /mnt/sdcard/cus_update_ota.tar.part'
+          echo "md5 mismatch: local $local_md5, camera ${remote_md5:-none}; removed the camera's copy, run the task again" >&2
+          exit 1
+        fi
+        echo "md5 OK: $local_md5"
+      - "ssh {{.SSH_OPTS}} root@{{.CAMERA_HOST}} 'mv /mnt/sdcard/cus_update_ota.tar.part /mnt/sdcard/cus_update_ota.tar && sync'"
+      - |
+        echo "installed /mnt/sdcard/cus_update_ota.tar on {{.CAMERA_HOST}}: firmware {{.FW_VERSION}} (cam-{{.FW_VERSION}}.tar)"
+        echo "The camera flashes it on its next boot (also an unplanned one). Run: task buddy:reboot"
+        echo "The update takes several minutes and the camera reboots twice. After a successful flash recovery deletes"
+        echo "cus_update_ota.tar; if it is still on the card when the camera is back, the flash failed."
+        echo "The card hook /mnt/sdcard/lp_app.sh must end with its last command in the background (\"... &\"),"
+        echo "otherwise the camera's \"reboot recovery\" waits forever and the update starts only when the hook's"
+        echo "last process exits. See docs/install/firmware-update.md"
+
+  buddy:firmware:sdcard:
+    desc: Download firmware FW_VERSION (buddy:firmware:download, FW_VERSION required) and copy it to a microSD card mounted on this host (SDCARD=mount point, required) as cus_update_ota.tar, which the camera flashes on its next boot. The path for cameras without the ssh add-on (stock firmware has at most telnet, not worth it for a 30 MB file) - take the card out, mount it here, then put it back and power the camera on. A card hook lp_app.sh must start its last command in the background ("... &"), otherwise the camera's "reboot recovery" waits until that process exits (see docs/install/firmware-update.md)
+    requires:
+      vars: [FW_VERSION, SDCARD]
+    preconditions:
+      - sh: 'echo "{{.FW_VERSION}}" | grep -Eqx "[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?"'
+        msg: 'FW_VERSION={{.FW_VERSION}} does not look like a firmware version (N.N.N, optionally with a suffix such as -rc1), e.g. FW_VERSION=3.1.6'
+      # The same checks as buddy:install.
+      - sh: 'findmnt -rn --mountpoint "{{.SDCARD}}" > /dev/null'
+        msg: '{{.SDCARD}} is not a mount point. Mount the microSD card and pass its mount point, e.g. SDCARD=/run/media/$USER/SDCARD'
+      - sh: 'test "$(findmnt -rn -o FSTYPE --mountpoint "{{.SDCARD}}")" = vfat'
+        msg: '{{.SDCARD}} is not a vfat filesystem; the camera mounts its card as vfat. Wrong path?'
+      - sh: 'test -w "{{.SDCARD}}"'
+        msg: '{{.SDCARD}} is not writable (read-only mount or wrong owner)'
+    cmds:
+      - task: buddy:firmware:download
+        vars:
+          FW_VERSION: '{{.FW_VERSION}}'
+          OTA_HOST: '{{.OTA_HOST}}'
+      - |
+        if [ -e "{{.SDCARD}}/fac_update_ota.tar" ]; then
+          echo "WARNING: {{.SDCARD}}/fac_update_ota.tar exists. Recovery flashes it instead of cus_update_ota.tar and never deletes it, so the camera flashes it on every boot; remove it first" >&2
+        fi
+      # To a .part name first, so an interrupted copy never leaves a cus_update_ota.tar that recovery would try.
+      - cp "firmware_images/cam-{{.FW_VERSION}}.tar" "{{.SDCARD}}/cus_update_ota.tar.part"
+      - sync
+      - |
+        local_md5=$(md5sum "firmware_images/cam-{{.FW_VERSION}}.tar" | cut -d' ' -f1)
+        card_md5=$(md5sum "{{.SDCARD}}/cus_update_ota.tar.part" | cut -d' ' -f1)
+        if [ "$local_md5" != "$card_md5" ]; then
+          rm -f "{{.SDCARD}}/cus_update_ota.tar.part"
+          echo "md5 mismatch: local $local_md5, card $card_md5; removed the card's copy, run the task again" >&2
+          exit 1
+        fi
+        echo "md5 OK: $local_md5"
+      - mv "{{.SDCARD}}/cus_update_ota.tar.part" "{{.SDCARD}}/cus_update_ota.tar"
+      - sync
+      - |
+        echo "installed {{.SDCARD}}/cus_update_ota.tar: firmware {{.FW_VERSION}} (cam-{{.FW_VERSION}}.tar)"
+        echo "Now: umount \"{{.SDCARD}}\", put the card in the camera and power it on."
+        echo "The update takes several minutes and the camera reboots twice. After a successful flash recovery deletes"
+        echo "cus_update_ota.tar; if it is still on the card when the camera is back, the flash failed."
+        echo "A card hook lp_app.sh must end with its last command in the background (\"... &\"), otherwise the"
+        echo "camera's \"reboot recovery\" waits forever and the update starts only when the hook's last process"
+        echo "exits. See docs/install/firmware-update.md"

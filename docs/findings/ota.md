@@ -4,7 +4,8 @@ Where the camera looks for firmware updates, how it picks the server, what the s
 package contains. Sources: the strings of the 3.1.0 `lp_app` (dump), of the live 3.1.3 `lp_app`
 (`firmware_images/scard-content-old/live-3.1.3/oem/usr/sbin/lp_app`, md5 `ee845fa0b2e4a8cc0eaf5d7135b8f144`) and of
 the 3.1.6 `lp_app` from the 3.1.6 package (md5 `6747721508ef6c5091009fdf5f69431f`), the packages in
-`firmware_images/`, and requests to both update servers from a host on 2026-11-10. More on the update code is in
+`firmware_images/`, and requests to both update servers from a host on 2026-11-10 and 2026-11-22, the camera's
+`lp_app` logs and the recovery partition dumped from the camera. More on the update code is in
 [`lp_app`](cam-3.1.3/oem/usr/sbin/lp_app.md#shutdown-reboot-and-ota).
 
 ## Summary
@@ -13,7 +14,12 @@ the 3.1.6 `lp_app` from the 3.1.6 package (md5 `6747721508ef6c5091009fdf5f69431f
   labelled `OTA Unstable version` in the log strings.
 - Update check: HTTPS GET `/api/niceboy/v1/camera` on `connect-ota.prusa3d.com` (production) or
   `connect-ota-staging.prusa3d.com` (staging).
-- On 2026-11-10 both servers offered **3.1.6**, the same package (same SHA-1).
+- On 2026-11-10 both servers offered **3.1.6**, the same package (same SHA-1). On 2026-11-22 production still
+  offered 3.1.6, while staging offered **3.1.7** (see [3.1.6 → 3.1.7 differences](cam-3.1.7-diff.md)).
+- `lp_app` 3.1.3 checks about every 10 hours, the first time about 10 hours after start, and only in a daytime
+  window that starts at 08:00 (see [When it updates](#when-it-updates)).
+- Recovery installs a package placed on the card as `cus_update_ota.tar`
+  (see [The recovery system](#the-recovery-system) and [Firmware update](../install/firmware-update.md)).
 - A file on the microSD card, `/mnt/sdcard/ota`, or the `lp_app --ota` option switches the server.
 - The 3.1.6 package is the first one with a `rootfs.img`, so updating to it rewrites the root filesystem. The
   packages up to 3.1.3 contain only `boot.img` and `oem.img`.
@@ -28,7 +34,8 @@ the 3.1.6 `lp_app` from the 3.1.6 package (md5 `6747721508ef6c5091009fdf5f69431f
 | staging ("unstable") | `connect-ota-staging.prusa3d.com` | `OTA=dev`, `OTA=unstable` or `OTA=stage` |
 
 - Update check: `https://<host>/api/niceboy/v1/camera`
-- Package on 2026-11-10: `https://<host>/file/cam-3.1.6.tar`
+- Package on 2026-11-10: `https://<host>/file/cam-3.1.6.tar`. On 2026-11-22 production still offered 3.1.6;
+  staging offered `cam-3.1.7.tar`.
 
 Both host names are compiled into all three `lp_app` builds. The path `niceboy` is the name of the camera's OEM
 platform; `lp_app` also reports `manufacturer` = `Niceboy`.
@@ -48,6 +55,10 @@ Answers to requests from a host without the token, on 2026-11-10. They were the 
 
 The staging server answered the same, with its own host name in `file`. Whether the server answers differently to a
 request with a real camera token was not tested.
+
+On 2026-11-22 production answered the same as above. Staging answered `last_version` `3.1.7` with `sha1sum`
+`219e700df177b6ba19d483cf0cc4dadd88c7efb7`, `force_upgrade` false and still no `last_release_type`. Details in
+[3.1.6 → 3.1.7 differences](cam-3.1.7-diff.md#where-317-came-from).
 
 Fields:
 
@@ -105,19 +116,55 @@ So a beta would be a release-candidate type in `last_release_type`, most likely 
 
 ## When it updates
 
-- **Periodic check.** The interval can change at run time (`Change request interval to %d seconds`); its default
-  was not found.
+- **Periodic check.** Seen in the `lp_app` 3.1.3 logs of the maintainer's camera: no check when `lp_app` starts;
+  the first check about 10 hours after start, then every 10 hours. The interval can change at run time
+  (`Change request interval to %d seconds`); where the 10 hours come from was not traced.
 - **Cloud command.** Prusa Connect can send `start_fw_update` (`Start upgrade FW now! Force upgrade`).
-- **Daytime window.** 3.1.3 and 3.1.6 check the hour (`Current hour: %d`, `Within daytime upgrade interval`,
-  `Outside daytime upgrade interval`). The window's hours were not traced.
+- **Daytime window.** 3.1.3 and 3.1.6 check the hour (`Current hour: %d`). In the 3.1.3 logs the window starts at
+  08:00 camera time (UTC); checks were seen up to 19:44, so its end lies after that. Log lines seen:
+  `query ota firmware info` (a check), `Within daytime upgrade interval`, and outside the window
+  `Outside daytime upgrade interval` every 15 seconds, until the check at 08:00.
 - **Forced update after boot (3.1.6).** `First OTA check after boot. force_upgrade: %d` and
   `Force auto upgrade. ret: %d, force_upgrade: %d, isFirstOtaCheckAfterBoot: %d`: with `force_upgrade` true,
   the first check after a boot installs the update [INFERENCE: whether the daytime window applies].
 
 The install steps are the same in all three builds: download to `/userdata/update_ota.tar`, check the SHA-1 (on a
 mismatch the file is deleted and `ota_fw_download_failed` is reported), play `upgrading.wav`, write `boot-recovery`
-to the misc partition `/dev/mtd3`, then `reboot recovery`. The recovery system runs `RK_OTA_update.sh` from the
-package [INFERENCE: the recovery image was not examined].
+to the misc partition `/dev/mtd3`, then `reboot recovery`. The recovery system then installs the package, see below.
+
+`reboot recovery` (from this OTA path and from the card path of `RkLunch.sh` below) only takes effect after
+`/etc/init.d/rcS` has finished, because busybox init waits for its sysinit actions. A card `lp_app.sh` hook that
+runs in the foreground keeps rcS from finishing and so blocks the update (observed 2026-11-22, see
+[Firmware update from the microSD card](../install/firmware-update.md)).
+
+## The recovery system
+
+Source: the recovery partition `/dev/mtd5` ("recovery", 4 MiB), dumped from the maintainer's camera (3.1.3) to
+`firmware_images/live-partitions/recovery.bin` (md5 `3adb856b9dcd66f53e1623e732ad72df`). It is a FIT image; its
+gzip cpio initramfs starts at offset 2840064. `etc/init.d/S99lunch_recovery` in it runs `/usr/bin/RkLunch.sh`
+(not the same script as the stock `/oem/usr/bin/RkLunch.sh`).
+
+How the stock firmware gets there without `lp_app`: the stock `/oem/usr/bin/RkLunch.sh` (identical in 3.1.3 and
+3.1.6) runs `reboot recovery` after playing `upgrading.wav` if `/mnt/sdcard/cus_update_ota.tar` or
+`fac_update_ota.tar` exists. This happens before the card's `lp_app.sh` hook.
+
+The recovery `RkLunch.sh`:
+
+1. Uses `/userdata/update_ota.tar` (the download by `lp_app`) if it exists: extracts it to `/userdata/update/`,
+   runs `RK_OTA_update.sh`, deletes the package and `update/` and reboots on success. On an extraction or flash
+   error it deletes both and goes on with the card.
+2. Otherwise mounts the first SD card device found (`mmcblk0` to `mmcblk2`) as vfat at `/mnt/sdcard`. It takes
+   `fac_update_ota.tar` if present, else `cus_update_ota.tar`, extracts it to `/mnt/sdcard/update/` and runs
+   `RK_OTA_update.sh` from there.
+3. On success it removes `update/` and reboots. It removes `cus_update_ota.tar` first; a `fac_update_ota.tar` is
+   not removed, instead recovery waits until the card's device node disappears (card pulled) and then reboots.
+   The inittab shutdown runs `umount -a -r`, so the deletion reaches the card.
+4. On a tar extraction error it exits and leaves the package and `update/`. The stock `RkLunch.sh` then sends the
+   camera to recovery again on every boot, until the card is removed.
+5. On a flash error it removes `update/` but leaves the package, so the next boot tries again.
+
+So an official `cam-<version>.tar`, copied to the card as `cus_update_ota.tar`, is installed on the next boot. The
+tasks in [Firmware update](../install/firmware-update.md) do that.
 
 ## Packages
 
@@ -131,9 +178,11 @@ The package URL follows the pattern `https://connect-ota.prusa3d.com/file/cam-<v
 | 3.1.4 | 200 | 22190080 | not examined |
 | 3.1.5 | 200 | 22579200 | not examined |
 | 3.1.6 | 200 | 31232000 | `boot.img`, **`rootfs.img`**, `oem.img`, `RK_OTA_update.sh` |
-| 3.1.7 | 404 | — | does not exist yet |
+| 3.1.7 | 404 production, 200 staging | 22978560 | `boot.img`, `oem.img`, `RK_OTA_update.sh`; no rootfs (2026-11-22) |
 
-`firmware_images/cam-3.1.6.tar` has the SHA-1 that both servers announce.
+`firmware_images/cam-3.1.6.tar` has the SHA-1 that both servers announced on 2026-11-10.
+`firmware_images/cam-3.1.7.tar` has the SHA-1 that staging announced on 2026-11-22; see
+[3.1.6 → 3.1.7 differences](cam-3.1.7-diff.md).
 
 The 3.1.1 and 3.1.2 packages in `firmware_images/` (17602560 bytes each) also contain only `boot.img` and
 `oem.img`.
@@ -144,7 +193,8 @@ package so far has a `userdata.img`, so `/userdata` (configuration, Prusa Connec
 written by any of them.
 
 The 3.1.6 `rootfs.img` (UBI) has the stock `/etc/hosts` (`localhost` and `Rockchip` only). Updating to 3.1.6
-therefore removes a `connect-ota.prusa3d.com` line from `/etc/hosts`. Earlier packages leave it in place.
+therefore removes a `connect-ota.prusa3d.com` line from `/etc/hosts`. Earlier packages leave it in place. 3.1.7
+has no `rootfs.img`, so it keeps the rootfs of whatever was installed before.
 
 ## On the maintainer's camera
 
@@ -152,11 +202,10 @@ therefore removes a `connect-ota.prusa3d.com` line from `/etc/hosts`. Earlier pa
 - `/etc/hosts` maps `connect-ota.prusa3d.com` to `127.0.0.1`, so the update check cannot reach the server and the
   camera does not see 3.1.6 [INFERENCE: from the hosts entry; no failed check was found in the logs]. Where the line
   came from is unknown. `uninstall.sh --hosts` removes it.
-- A search of the card's `lp_app` logs for update messages was killed on the camera (out of memory on the large log
-  files), so nothing is known about earlier checks.
-- Updating by hand without the server: `RkLunch.sh` reboots into recovery when `/mnt/sdcard/cus_update_ota.tar` or
-  `fac_update_ota.tar` exists (see [`RkLunch.sh`](cam-3.1.3/oem/usr/bin/RkLunch.sh.md)). Whether recovery takes
-  a downloaded `cam-<version>.tar` renamed to that name was not tested [INFERENCE].
+- The check timing in [When it updates](#when-it-updates) comes from the card's `lp_app` logs of this camera.
+- Updating by hand without the server: put the package on the card as `cus_update_ota.tar` (see
+  [The recovery system](#the-recovery-system), [`RkLunch.sh`](cam-3.1.3/oem/usr/bin/RkLunch.sh.md) and
+  [Firmware update](../install/firmware-update.md)).
 
 ## Evidence
 
