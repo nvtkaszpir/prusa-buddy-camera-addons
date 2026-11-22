@@ -11,10 +11,11 @@
 #
 # Why the passwd copy: dropbear refuses pubkey auth unless every directory from
 # the authorized_keys path up to the user's home (or up to "/") is owned by
-# root/user and not group/other-writable. On this camera "/" is 775 owned by
-# uid 1001, so keys under /userdata fail. Root's home is /root, which does not
-# exist on the read-only rootfs. Bind-mounting a passwd copy whose root home is
-# /userdata/ssh makes the walk stop at /userdata/ssh.
+# root/user and not group/other-writable. On this camera "/" is owned by uid
+# 1001 (mode 775 on firmware 3.1.3, 755 on 3.1.6), so keys under /userdata fail.
+# Root's home /root does not help: the 3.1.0 dump has none, and the 3.1.6 rootfs
+# has one owned by uid 1001 as well. Bind-mounting a passwd copy whose root home
+# is /userdata/ssh makes the walk stop at /userdata/ssh.
 #
 # The microSD card (/mnt/sdcard/bin) is the source of truth: binaries and
 # authorized_keys are refreshed from it on each start.

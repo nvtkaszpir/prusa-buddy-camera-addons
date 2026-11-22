@@ -27,6 +27,10 @@ qemu-arm-static out/lighttpd -v                   # lighttpd/1.4.85 (ssl) - a li
 - Dotfiles and dot-directories are hidden and denied (403) at any depth.
 - `rclone.conf`, `htpasswd`, `*.key`, `*.pem` and `authorized_keys` are denied (403) and hidden from listings.
 - The card's `/userdata/` directory is denied (403) and hidden from listings. It holds copies of the camera's `/userdata/*` made by `lp_app.sh` at every boot, including `xhr_config.ini` (Prusa Connect token and Wi-Fi AP password) and `xhr_http_token.conf`.
+- `sdcard_cfg.txt` and `sdcard_cfg_applied.txt` are denied (403) and hidden from listings. lp_app 3.1.6 and later
+  reads `/mnt/sdcard/sdcard_cfg.txt` at start (keys `token`, `ssid`, `pwd`, as in the setup QR code), applies it
+  and renames it to `sdcard_cfg_applied.txt`, which stays on the card with the Prusa Connect token and Wi-Fi
+  password in clear text.
 - URL matching is case-insensitive, as on vfat, so `/RCLONE.CONF` is denied too.
 - Read-only: only GET and HEAD. No webdav, cgi or proxy modules are compiled in.
 - HTTP basic auth on every URL, on both ports (realm `camera`, `require valid-user`). Users and password hashes are read from `/userdata/httpd/htpasswd`, which `start-httpd.sh` copies from the card's `/mnt/sdcard/bin/htpasswd`. Without that file every request gets 401. A successful login is remembered for 10 minutes (`auth.cache` with `max-age` 600), so `wget --mirror` does not pay the hash cost on every request. See [Users and passwords](#users-and-passwords).

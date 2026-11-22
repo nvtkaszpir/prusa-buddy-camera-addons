@@ -51,7 +51,13 @@ The ssh block runs `start-sshd.sh`, which:
 
 Logs: `start-sshd.sh` writes its own steps to `/mnt/sdcard/logs/dropbear.log` (or `/tmp/dropbear.log` if the logs dir is missing). The running dropbear daemon logs (connections, auth) to `/tmp/dropbear.log`, which is lost on reboot. The daemon is kept off the card on purpose: it runs with cwd `/` and opens nothing on `/mnt/sdcard`, because the hook unmounts and remounts the card right after it starts, and an open file would make that `umount` fail with "busy".
 
-Why the passwd copy: dropbear refuses pubkey auth unless every directory on the path from `authorized_keys` up to the user's home directory is owned by root or the user and not group- or world-writable. Its check walks all the way up to `/` unless it reaches the home directory first. On this camera `/` is `775` owned by uid 1001, and root's home (`/root`) does not exist, so keys under `/userdata` would silently fail. Making root's home `/userdata/ssh` stops the walk there. This was confirmed in the dropbear source (`src/svr-authpubkey.c`, `checkpubkeyperms`), and the bind mount works on the camera.
+Why the passwd copy: dropbear refuses pubkey auth unless every directory on the path from `authorized_keys` up to
+the user's home directory is owned by root or the user and not group- or world-writable. Its check walks all the way
+up to `/` unless it reaches the home directory first. On this camera `/` is owned by uid 1001 (mode `775` on
+firmware 3.1.3, `755` on 3.1.6), so keys under `/userdata` would silently fail. Root's home `/root` does not help:
+the 3.1.0 dump has none, and on 3.1.6 it is owned by uid 1001 as well. Making root's home `/userdata/ssh` stops the
+walk there. This was confirmed in the dropbear source (`src/svr-authpubkey.c`, `checkpubkeyperms`), and the bind
+mount works on the camera.
 
 Side effect: a telnet root login (if telnet is re-enabled) also gets `/userdata/ssh` as its home directory. Nothing else changes.
 

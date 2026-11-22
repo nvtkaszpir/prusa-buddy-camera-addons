@@ -46,6 +46,9 @@ own key on the camera. For a speed comparison of HTTP, HTTPS and rsync over ssh,
   - dotfiles at any depth;
   - `rclone.conf`, `*.key`, `*.pem`, `authorized_keys`, `htpasswd`;
   - the card's `/userdata/`, which holds the Prusa Connect token and Wi-Fi password copies;
+  - `sdcard_cfg.txt` and `sdcard_cfg_applied.txt`: lp_app 3.1.6 and later reads `sdcard_cfg.txt` at start (keys
+    `token`, `ssid`, `pwd`, as in the setup QR code), applies it and renames it to `sdcard_cfg_applied.txt`,
+    which stays on the card with the token and Wi-Fi password in clear text;
   - `/logs/` (the `lp_app` and add-on logs, which can contain the token and Wi-Fi credentials). The block in
     `lighttpd.conf` says how to serve them again; do that only with HTTPS and auth on.
 

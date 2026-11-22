@@ -10,7 +10,7 @@ Add-ons for the Buddy3D camera that ships with the Prusa CORE One L:
 - time sync
 - a microSD card check (fsck.fat)
 
-Tested with camera firmware cam-3.1.3.
+Tested with camera firmware cam-3.1.3 and cam-3.1.6 (2026-11-22).
 
 Documentation: <https://nvtkaszpir.github.io/prusa-buddy-camera-addons/> (built from [`docs/`](docs/)).
 
