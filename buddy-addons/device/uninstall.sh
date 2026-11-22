@@ -5,7 +5,10 @@
 # Usage: sh uninstall.sh [-n] [--stock] [--hosts]
 #   (no option)  stop the add-on daemons and loops, undo the /etc/passwd bind mount, delete the add-on
 #                state in /userdata (bin, ssh, httpd, rsyslog, logrotate) and the add-on files in
-#                /mnt/sdcard/bin. The hook blocks in /mnt/sdcard/lp_app.sh then do nothing on the next boot.
+#                /mnt/sdcard/bin, and re-enable lp_app's own syslog forwarding that start-rsyslog.sh disabled (rename
+#                /mnt/sdcard/syslog_srv.disabled back to syslog_srv; uncomment the SYSLOG_IP/SYSLOG_PORT
+#                lines in /mnt/sdcard/srv_cfg.txt). The hook blocks in /mnt/sdcard/lp_app.sh then do
+#                nothing on the next boot.
 #   --stock      also rename /mnt/sdcard/lp_app.sh to lp_app.sh.bak-uninstall-<time>, so the next boot starts
 #                lp_app the stock way; set rtsp_server_mode back to the factory default 1 (RTSP off); delete
 #                /mnt/sdcard/userdata/, the hook's copies of /userdata (Prusa Connect token, Wi-Fi password);
@@ -147,6 +150,27 @@ if [ "$DRY" = 0 ] && [ -d "$SDCARD/bin" ]; then
   else
     log "keeping $SDCARD/bin, it holds other files: $(ls -A "$SDCARD/bin" | tr '\n' ' ')"
   fi
+fi
+
+# ---- lp_app's own syslog forwarding, disabled by start-rsyslog.sh -------------------------------
+# Without the add-on rsyslogd, lp_app forwards its log itself again (syslog_srv: 3.1.6+, srv_cfg.txt: 3.1.7+).
+# The prefix start-rsyslog.sh writes: "# disabled by start-rsyslog.sh: ", as a regex (the dot escaped).
+SYSLOG_OFF_RE='^# disabled by start-rsyslog\.sh: '
+if [ -e "$SDCARD/syslog_srv.disabled" ] && [ ! -e "$SDCARD/syslog_srv" ]; then
+  act "rename $SDCARD/syslog_srv.disabled to $SDCARD/syslog_srv" \
+    mv "$SDCARD/syslog_srv.disabled" "$SDCARD/syslog_srv"
+fi
+# Temp file in the same directory + mv, so a failure never leaves a half-written srv_cfg.txt.
+restore_srv_cfg() {
+  if sed "s/$SYSLOG_OFF_RE//" "$SDCARD/srv_cfg.txt" > "$SDCARD/srv_cfg.txt.uninstall" &&
+    mv "$SDCARD/srv_cfg.txt.uninstall" "$SDCARD/srv_cfg.txt"; then
+    return 0
+  fi
+  rm -f "$SDCARD/srv_cfg.txt.uninstall"
+  return 1
+}
+if grep -q "$SYSLOG_OFF_RE" "$SDCARD/srv_cfg.txt" 2>/dev/null; then
+  act "re-enable the SYSLOG_IP/SYSLOG_PORT lines in $SDCARD/srv_cfg.txt" restore_srv_cfg
 fi
 
 # ---- --stock: no hook, factory RTSP setting, no config copies on the card ------------------------

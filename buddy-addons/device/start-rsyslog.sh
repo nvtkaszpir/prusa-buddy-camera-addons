@@ -38,6 +38,24 @@
 # address), hostapd is not running, and NTP has synchronized the clock (ntpsync exits
 # 0). Otherwise a waiter polls every 10 s and logs state changes only. A running
 # rsyslogd is left alone while the camera is not ready.
+#
+# The stock ntpd (S10ntp) starts seconds after boot, before Wi-Fi has an address, and stays
+# unsynchronized for many minutes (why was not traced; failed DNS lookups retried at growing
+# intervals is a guess). The waiter therefore restarts ntpd at the first poll that
+# sees a station address but an unsynchronized clock, and again every 30 s while the clock
+# stays unsynchronized (at most NTPD_RESTARTS times): a restart right after Wi-Fi comes up
+# does not always help, although /etc/resolv.conf already lists the DNS servers (seen at boot:
+# one restart at 26 s, synchronized only at 335 s; with retries, a restart at 88 s synchronized
+# within 11 s). Same command line as the running ntpd (lp_app may run its own, with
+# -c /tmp/ntp.conf). If no ntpd runs, none is started.
+#
+# lp_app's own syslog forwarding is disabled on every start (also before the readiness
+# gate, as lp_app reads its settings once when it starts, right after this script):
+#   /mnt/sdcard/syslog_srv        renamed to syslog_srv.disabled (an older one is replaced)
+#   /mnt/sdcard/srv_cfg.txt       SYSLOG_IP= and SYSLOG_PORT= lines (lp_app 3.1.7+) are
+#                                 commented out with "# disabled by start-rsyslog.sh: ";
+#                                 the other lines are left as they are
+# rsyslog already forwards lp_app's log files; with both, every line arrives twice.
 
 SRC=/mnt/sdcard/bin
 DIR=/userdata/rsyslog
@@ -51,11 +69,22 @@ PLACEHOLDER=REMOTE_HOST
 LOGDIR=/mnt/sdcard/logs
 WAITPID=/tmp/rsyslog-wait.pid
 WAIT_INTERVAL=10
+# ntpd restarts by the waiter while the clock stays unsynchronized: every 3 polls (30 s), at most 10.
+NTPD_RESTART_POLLS=3
+NTPD_RESTARTS=10
 # Readiness gate inputs. The overrides in the environment are for testing only.
 IFCONFIG=${IFCONFIG:-ifconfig}
 WIFI_IF=${WIFI_IF:-wlan0}
 AP_IP=${AP_IP:-192.168.42.1}
 NTPSYNC=${NTPSYNC:-/mnt/sdcard/bin/ntpsync}
+# ntpd restarted once by the waiter; the program used when argv[0] is not in PATH.
+NTPD_PIDFILE=/var/run/ntpd.pid
+NTPD_BIN=/oem/usr/bin/ntpd
+# lp_app's built-in syslog forwarding settings.
+LP_SYSLOG_SRV=/mnt/sdcard/syslog_srv
+LP_SRV_CFG=/mnt/sdcard/srv_cfg.txt
+LP_SYSLOG_RE='^[[:space:]]*SYSLOG_(IP|PORT)[[:space:]]*='
+LP_DISABLED_PREFIX='# disabled by start-rsyslog.sh: '
 # This script's absolute path: the waiter runs with cwd /.
 case "$0" in /*) self=$0 ;; *) self=$(pwd)/$0 ;; esac
 
@@ -105,6 +134,71 @@ not_ready_reason() {
   esac
 }
 
+# Running ntpd pid on stdout; fails if none. Pid file first, then a /proc scan.
+ntpd_pid() {
+  pid=$(cat "$NTPD_PIDFILE" 2>/dev/null)
+  if [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = ntpd ]; then
+    echo "$pid"
+    return 0
+  fi
+  for d in /proc/[0-9]*; do
+    if [ "$(cat "$d/comm" 2>/dev/null)" = ntpd ]; then
+      echo "${d#/proc/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Restart the running ntpd with its own command line (it started before the network
+# and keeps retrying DNS). Does nothing but log when no ntpd is running.
+restart_ntpd() {
+  if ! pid=$(ntpd_pid); then
+    log "ntpd not running, not restarting it"
+    return 1
+  fi
+  # argv, one per line (arguments with newlines do not occur in ntpd command lines).
+  args=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null)
+  if [ -z "$args" ]; then
+    log "failed to restart ntpd: cannot read /proc/$pid/cmdline"
+    return 1
+  fi
+  oldifs=$IFS
+  IFS='
+'
+  set -f
+  set -- $args
+  set +f
+  IFS=$oldifs
+  prog=$1
+  shift
+  case "$prog" in
+    */*) ;;
+    *) command -v "$prog" >/dev/null 2>&1 || prog=$NTPD_BIN ;;
+  esac
+  ntpd_pidfile=""
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = -p ] && ntpd_pidfile=$a
+    prev=$a
+  done
+  kill "$pid" 2>/dev/null
+  for i in 1 2 3 4 5; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  [ -n "$ntpd_pidfile" ] && rm -f "$ntpd_pidfile"
+  # ntpd daemonizes itself; the parent returns at once.
+  if (cd / && exec "$prog" "$@") < /dev/null > /dev/null 2>&1; then
+    # The nameserver count shows whether DNS was configured yet (udhcpc writes /etc/resolv.conf).
+    log "restarted ntpd ($(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null) nameserver(s) in /etc/resolv.conf): $prog $*"
+  else
+    log "failed to restart ntpd (rc $?): $prog $*"
+    return 1
+  fi
+}
+
 # Pid of the running waiter on stdout; fails if none.
 waiter_pid() {
   [ -f "$WAITPID" ] || return 1
@@ -128,9 +222,13 @@ stop_waiter() {
   log "stopped waiter (pid $pid)"
 }
 
-# Waiter: poll until ready. Logs state changes only, never every poll.
+# Waiter: poll until ready. Logs state changes only, never every poll. While there is a
+# station address but the clock is unsynchronized, restart ntpd at once and then every
+# NTPD_RESTART_POLLS polls, at most NTPD_RESTARTS times per run.
 wait_for_ready() {
   last=""
+  ntpd_restarts=0
+  polls_since_restart=$NTPD_RESTART_POLLS
   while :; do
     reason=$(not_ready_reason)
     if [ -z "$reason" ]; then
@@ -141,8 +239,43 @@ wait_for_ready() {
       log "waiting: $reason"
       last=$reason
     fi
+    if [ "$reason" = "NTP not synchronized" ]; then
+      if [ "$polls_since_restart" -ge "$NTPD_RESTART_POLLS" ] && [ "$ntpd_restarts" -lt "$NTPD_RESTARTS" ]; then
+        ntpd_restarts=$((ntpd_restarts + 1))
+        polls_since_restart=0
+        restart_ntpd
+      fi
+      polls_since_restart=$((polls_since_restart + 1))
+    fi
     sleep "$WAIT_INTERVAL"
   done
+}
+
+# Turn off lp_app's own forwarding so the server does not get its lines twice.
+# Idempotent: a renamed file is gone and commented lines no longer match.
+disable_builtin_forwarding() {
+  if [ -f "$LP_SYSLOG_SRV" ]; then
+    if [ -e "$LP_SYSLOG_SRV.disabled" ]; then
+      log "replacing $LP_SYSLOG_SRV.disabled with newer $LP_SYSLOG_SRV"
+    fi
+    if mv -f "$LP_SYSLOG_SRV" "$LP_SYSLOG_SRV.disabled"; then
+      log "disabled lp_app syslog forwarding: renamed $LP_SYSLOG_SRV to $LP_SYSLOG_SRV.disabled"
+    else
+      log "failed to rename $LP_SYSLOG_SRV; lp_app may forward its log too"
+    fi
+  fi
+  # Rewrite only when needed, through a temp file on the card so a power cut
+  # never leaves a half-written srv_cfg.txt (lp_app also reads OTA_SRV etc. from it).
+  if [ -f "$LP_SRV_CFG" ] && grep -qE "$LP_SYSLOG_RE" "$LP_SRV_CFG"; then
+    n=$(grep -cE "$LP_SYSLOG_RE" "$LP_SRV_CFG")
+    if sed -r "/$LP_SYSLOG_RE/s/^/$LP_DISABLED_PREFIX/" "$LP_SRV_CFG" > "$LP_SRV_CFG.tmp" &&
+       mv -f "$LP_SRV_CFG.tmp" "$LP_SRV_CFG"; then
+      log "disabled lp_app syslog forwarding: commented out $n SYSLOG_IP/SYSLOG_PORT line(s) in $LP_SRV_CFG"
+    else
+      rm -f "$LP_SRV_CFG.tmp"
+      log "failed to update $LP_SRV_CFG; lp_app may forward its log too"
+    fi
+  fi
 }
 
 case "$1" in
@@ -152,6 +285,10 @@ case "$1" in
   wait) restart=1; waiter=1 ;;
   *) echo "usage: $0 [restart|stop]" >&2; exit 2 ;;
 esac
+
+# Before the readiness gate: lp_app starts right after this script returns, and the
+# waiter would be too late. Not in the waiter itself (already done by its parent).
+[ "$waiter" = 1 ] || disable_builtin_forwarding
 
 # Readiness gate. The boot hook must not block: when not ready, the waiter runs the
 # start path later and this call returns at once.

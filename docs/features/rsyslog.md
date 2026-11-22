@@ -19,7 +19,20 @@ written locally. Before this add-on the camera had no syslog daemon, so `syslog(
   [http/https](https.md) block if you have it, and right before `/tmp/sync_loop.sh`.
 - `start-rsyslog.sh` returns at once. It starts rsyslogd only when wlan0 has a station IPv4 address (not the AP
   address 192.168.42.1), hostapd is not running, and `ntpsync` reports a synchronized clock. Until then a
-  background waiter checks every 10 s.
+  background waiter checks every 10 s. `ntpsync` counts the clock as synchronized when the kernel
+  flag says so or when the local ntpd answers an NTP query on 127.0.0.1 with a selected source (stratum 1-15).
+  That passes a few seconds after ntpd reaches a server. The stock ntpd keeps the kernel flag unsynchronized
+  for about 12-14 min after start, so the old kernel-only check delayed rsyslogd that long.
+- The stock ntpd starts about 2 s after boot, before Wi-Fi has an address, and then stays unsynchronized for
+  many minutes (still at 300 s after boot, measured; why was not traced: DNS lookups failing before the network
+  is up and retried at growing intervals is a guess [INFERENCE]). So while there is a station address but the
+  clock is unsynchronized, the waiter restarts ntpd, at once and then every 30 s, at most 10 times, with the
+  running ntpd's own command line (lp_app 3.1.7 may run it with `-c /tmp/ntp.conf`), and logs
+  `restarted ntpd (N nameserver(s) in /etc/resolv.conf): ...`. If no ntpd runs, it starts none. The first
+  restart right after Wi-Fi comes up does not always help, although the DNS servers are already configured.
+  Measured boots (2026-11-22, 3.1.6): old kernel-only check about 12 min; one restart only at 26 s: synchronized
+  at 335 s; retries every 60 s: second restart at 88 s, rsyslogd started at 99 s; retries every 30 s: second
+  restart at 57 s, rsyslogd started at 68 s. Details: [NTP findings](../findings/ntp.md).
 - At start it copies the bundle and config to `/userdata/rsyslog/`. A new config is installed only if no
   non-comment line still contains `REMOTE_HOST` and `rsyslogd -N1` accepts it. Otherwise it logs `REJECTED`
   and keeps the old config. rsyslogd is restarted only when the bundle or config changed.
@@ -32,6 +45,18 @@ written locally. Before this add-on the camera had no syslog daemon, so `syslog(
   | `/mnt/sdcard/logs/YYYY-MM-DD_HH.log` | imfile | `lp_app:` | `local0.info` |
   | other `/mnt/sdcard/logs/*.log` | imfile | file base name, e.g. `httpd:` | `local0.info` |
 
+- lp_app 3.1.6 and later can forward its own log to a syslog server (UDP, RFC 5424) when
+  `/mnt/sdcard/syslog_srv` has `IP=<IPv4 address>` and `PORT=<port>` lines (default port 514); 3.1.7 also reads
+  `SYSLOG_IP=` / `SYSLOG_PORT=` in `/mnt/sdcard/srv_cfg.txt`. With both forwarders on, the server would get every
+  lp_app line twice, so every run of `start-rsyslog.sh` turns the built-in one off:
+  - it renames `/mnt/sdcard/syslog_srv` to `/mnt/sdcard/syslog_srv.disabled`;
+  - in `/mnt/sdcard/srv_cfg.txt` it prefixes the `SYSLOG_IP=` and `SYSLOG_PORT=` lines with
+    `# disabled by start-rsyslog.sh: `;
+  - it logs each change to `/mnt/sdcard/logs/rsyslog.log`.
+
+  The hook runs it before lp_app starts, and lp_app reads these files only when it starts, so the built-in
+  forwarding never runs. `uninstall.sh` (default mode) restores both files. See
+  [Built-in lp_app syslog (3.1.6+) vs this add-on](#built-in-lp_app-syslog-316-vs-this-add-on).
 - Protocol: omfwd, UDP port 514 by default, classic BSD syslog format
   (`<PRI>Mmm dd hh:mm:ss HOSTNAME TAG: message`). TCP is optional.
 - imfile starts at the end of each file (`freshStartTail="on"`), so old logs and lines written before rsyslogd

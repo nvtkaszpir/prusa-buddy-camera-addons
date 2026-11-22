@@ -95,10 +95,14 @@ Without options, it:
    their command line in `/proc`, not through the pid files;
 2. unmounts the bind mount on `/etc/passwd`;
 3. deletes `/userdata/bin`, `/userdata/ssh`, `/userdata/httpd`, `/userdata/rsyslog` and `/userdata/logrotate`;
-4. deletes the add-on files from `/mnt/sdcard/bin/` (binaries, start scripts, configs, `authorized_keys`,
-   `htpasswd`, `rsyslog/`). If no other files are left, it deletes `bin/` too. With the start scripts gone, the
-   hook blocks in `lp_app.sh` do nothing on the next boot;
-5. stops the dropbear listener, as the last step. Open ssh sessions are separate processes and keep running.
+4. deletes the add-on files from `/mnt/sdcard/bin/` (binaries, start scripts, configs,
+   `authorized_keys`, `htpasswd`, `rsyslog/`). If no other files are left, it deletes `bin/` too. With the start
+   scripts gone, the hook blocks in `lp_app.sh` do nothing on the next boot;
+5. restores lp_app's built-in syslog forwarding, which `start-rsyslog.sh` turned off (see
+   [rsyslog](../features/rsyslog.md#how-it-works)): renames `/mnt/sdcard/syslog_srv.disabled` back to
+   `/mnt/sdcard/syslog_srv`, and removes the `# disabled by start-rsyslog.sh: ` prefix from the `SYSLOG_IP=` and
+   `SYSLOG_PORT=` lines in `/mnt/sdcard/srv_cfg.txt`. lp_app reads them at its next start;
+6. stops the dropbear listener, as the last step. Open ssh sessions are separate processes and keep running.
 
 Options:
 
@@ -195,7 +199,8 @@ nc -zv CAMERA_IP 22 8080 8443 554                 # all refused (554 stays open 
 cat /path/to/mounted/sdcard/logs/uninstall.log
 ```
 
-A remote syslog server stops receiving messages from the camera. If you still have a shell on the camera, e.g.
+The remote syslog server stops receiving the add-on's messages. If a `syslog_srv` file or `SYSLOG_IP=` line was
+restored, lp_app forwards its own lines again after its next start. If you still have a shell on the camera, e.g.
 because your hook keeps `telnetd`:
 
 ```sh

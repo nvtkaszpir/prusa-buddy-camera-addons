@@ -26,6 +26,8 @@ Each page documents one file from `/oem/usr/bin` or `/oem/usr/sbin`. The source 
   `local_cfg.tar` and `srv_cfg.txt`, Ethernet, Modbus, live555 RTSP, timelapse modes, and the add-on impact.
 - [NPU](npu.md): the RV1103G's NPU is enabled in the device tree, but its driver (`rknpu.ko`) is never loaded
   and nothing on the camera uses it.
+- [NTP](ntp.md): why the clock was reported synchronized only about 12 minutes after boot, the drift file that
+  did not help, and the `ntpsync` and rsyslog waiter changes that bring rsyslog's start down to about a minute.
 - [Swap](swap.md): the kernel is built without swap support, so neither a swapfile on the microSD card, a swap
   partition nor zram can work on the stock firmware (checked up to 3.1.6).
 - [Video memory](video-memory.md): how the 64 MB of RAM is split, and what the 24 MB reserved for video buffers
