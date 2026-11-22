@@ -22,6 +22,8 @@ Each page documents one file from `/oem/usr/bin` or `/oem/usr/sbin`. The source 
 - [Video](video.md): timelapse file format, AVI to MP4 conversion (tested on the camera), and the SoC's video encoder hardware (RV1103G: hardware H.264/H.265 encoder, no decoder).
 - [OTA firmware updates](ota.md): update servers (production and staging), the update check and its answer, the
   `/mnt/sdcard/ota` server switch, release types, and what each package (up to 3.1.6) rewrites.
+- [Firmware 3.1.6 → 3.1.7](cam-3.1.7-diff.md): what 3.1.7 (staging only on 2026-11-22) changes: no rootfs,
+  `local_cfg.tar` and `srv_cfg.txt`, Ethernet, Modbus, live555 RTSP, timelapse modes, and the add-on impact.
 - [NPU](npu.md): the RV1103G's NPU is enabled in the device tree, but its driver (`rknpu.ko`) is never loaded
   and nothing on the camera uses it.
 - [Swap](swap.md): the kernel is built without swap support, so neither a swapfile on the microSD card, a swap
