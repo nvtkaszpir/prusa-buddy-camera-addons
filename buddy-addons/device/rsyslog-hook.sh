@@ -3,7 +3,7 @@
 #   mount -t vfat -o rw,uid=0,gid=0,dmask=000,fmask=000,errors=remount-ro /dev/mmcblk1p1 /mnt/sdcard
 #   (or right after the microSD check block, fsck-hook.sh, which replaces that line)
 # and after the http/https file server block (if you have it), right BEFORE
-# "/tmp/sync_loop.sh" (which never returns). rsyslogd reads its config from the
+# the last line that starts lp_app ("/tmp/sync_loop.sh &" or "lp_app ... &"). rsyslogd reads its config from the
 # card and keeps the lp_app log files in /mnt/sdcard/logs open while tailing
 # them, so it must start after the final mount, not before the umount like
 # sshd. Started before sync_loop.sh, so /dev/log exists before lp_app runs.

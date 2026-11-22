@@ -86,11 +86,19 @@ add-on is started by a block from `buddy-addons/device/*-hook.sh` pasted into th
 3. HTTPS block (`httpd-hook.sh`).
 4. syslog block (`rsyslog-hook.sh`).
 5. logrotate block (`logrotate-hook.sh`).
-6. The line that starts `lp_app`, last.
+6. The line that starts `lp_app`, last, in the background (ending in ` &`).
 
 !!! warning "The hook must start lp_app"
     Without a final `lp_app` line (or a script such as `sync_loop.sh` that starts it), the camera boots without
     video, cloud connection and Wi-Fi management. `lp_app` manages the Wi-Fi, so ssh is unreachable too.
+
+!!! warning "The hook must return"
+    `RkLunch.sh` runs `lp_app.sh` in the foreground from `/etc/init.d/rcS`, and busybox init acts on a reboot
+    request only after rcS has finished. If the last line of the hook never returns (`lp_app ...` or
+    `/tmp/sync_loop.sh` without ` &`), plain `reboot` does nothing and `reboot recovery` hangs as well: a firmware
+    update from the card or from `lp_app` is not installed (see [Firmware update](firmware-update.md)).
+    An existing hook that ends in the foreground is fixed by appending ` &` to its last line, for example
+    `/tmp/sync_loop.sh &`, then rebooting with `task buddy:reboot`.
 
 # If you have your own customizations already?
 
@@ -105,15 +113,16 @@ d=$ADDONS/device
   echo '#!/bin/sh'
   echo 'mkdir -p /mnt/sdcard/logs /mnt/sdcard/timelapse'
   cat "$d/sshd-hook.sh" "$d/fsck-hook.sh" "$d/httpd-hook.sh" "$d/rsyslog-hook.sh" "$d/logrotate-hook.sh"
-  echo 'lp_app --noshell --log2file /mnt/sdcard/logs'
+  echo 'lp_app --noshell --log2file /mnt/sdcard/logs &'
 } > lp_app.sh
 ```
 
 Drop the `cat` arguments of the features you skip, but keep `fsck-hook.sh`: when `sdcard-fsck.sh` is missing it
 falls back to the stock `umount`/`mount` lines that remount the card read-write and executable. The last line starts
-`lp_app` in the foreground with its logs in `/mnt/sdcard/logs`; drop `--log2file /mnt/sdcard/logs` to keep
-`lp_app` logs off the card. This exact file is assembled from the repo blocks and the order above; it was not run
-as-is on the camera. [INFERENCE]
+`lp_app` in the background, as the stock `RkLunch.sh` does, with its logs in `/mnt/sdcard/logs`; drop
+`--log2file /mnt/sdcard/logs` to keep `lp_app` logs off the card. In the background the hook returns, so rcS
+finishes and reboots and firmware updates work. This exact file is assembled from the repo blocks and the order
+above; it was not run as-is on the camera. [INFERENCE]
 
 A hook that runs on a camera today has code blocks for:
 
@@ -121,7 +130,7 @@ A hook that runs on a camera today has code blocks for:
 - the HTTPS,
 - syslog
 - logrotate
-- ends with `/tmp/sync_loop.sh`, which starts `lp_app` when it is not running.
+- ends with `/tmp/sync_loop.sh &`, which starts `lp_app` when it is not running; the ` &` lets the hook return.
 
 Then flush via `sync`, leave the card and unmount it:
 
@@ -170,9 +179,10 @@ The new files are installed on the next boot, or at once by running the matching
 
 ## Rebooting
 
-Plain `reboot` does not restart the camera (see `buddy-addons/README.md`), and `sync; reboot -f` alone skips the
-unmount: `lp_app` still has its log open on the card, which then comes up dirty
-(`FAT-fs (mmcblk1p1): Volume was not properly unmounted` in `dmesg` on the next boot).
+With a hook that ends in the background, plain `reboot` restarts the camera (verified 2026-11-22), but it does not
+stop `lp_app` first: the next boot logged `FAT-fs (mmcblk1p1): Volume was not properly unmounted` in `dmesg`.
+`sync; reboot -f` alone skips the unmount too, as `lp_app` still has its log open on the card. With a hook that
+never returns, plain `reboot` does nothing at all (see the warning in [Add the boot hook](#4-add-the-boot-hook)).
 
 To reboot with the card cleanly unmounted, from the repo root:
 

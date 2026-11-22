@@ -6,8 +6,10 @@
 # Usage: sh safe-reboot.sh [-n]
 #   -n  dry run: list what would be stopped, change nothing, no reboot
 #
-# Why not plain "reboot": it did not restart this camera in testing. "reboot -f" alone skips the unmount,
-# and busybox init's own "umount -a -r" would run while lp_app still writes its log to the card. So:
+# Why not plain "reboot": busybox init acts on it only after rcS returns, so it does nothing while the card hook
+# (/mnt/sdcard/lp_app.sh) runs its last command (sync_loop.sh, lp_app) in the foreground. With "... &" there it
+# reboots, but the card is not cleanly unmounted (FAT "not properly unmounted" on the next boot): busybox init's
+# own "umount -a -r" runs while lp_app still writes its log to the card. "reboot -f" alone skips the unmount. So:
 #   1. SIGKILL sync_loop.sh, which would start lp_app again (its TERM trap would also kill -9 lp_app
 #      and sleep 300 s);
 #   2. SIGTERM lp_app, so it shuts its pipeline down and closes its log file. On firmware 3.1.3 it was still

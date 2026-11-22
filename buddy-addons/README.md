@@ -34,7 +34,7 @@ From the firmware dumps in this repo.
 | volatile | `/tmp`, `/run`, `/dev/shm` (tmpfs) | `readme.md` |
 | userland | busybox 1.27.2 + uClibc. Applets used here: `telnetd`, `nc`, `tftp`, `uudecode`, `md5sum`, `mount`, `timeout` (old `-t SECS` form). The running camera has no `base64`, `sha256sum` or `time` applet (checked with `busybox --list`). The firmware has no `fsck.vfat`/`fsck.fat` (busybox `fsck` is only a wrapper). Its busybox has `syslogd`, `klogd` and `logger` applets, but `ps` shows none running, so nothing creates `/dev/log` | `3/dump/bin/busybox`, `ps` (repo root), camera |
 | login | `/etc/profile` sets `PATH="/bin:/sbin:/usr/bin:/usr/sbin"` (drops `/userdata/bin`) and prints nothing non-interactive | `3/dump/etc/profile` |
-| root | `/etc/passwd` home `/root`, which **does not exist** on the rootfs. Password is an md5crypt hash in `/etc/shadow` (plaintext unknown) | `3/dump/etc/passwd`, `shadow` |
+| root | home `/root`: missing in the 3.1.0 dump, owned by uid 1001 on 3.1.6; `/` is owned by uid 1001 (mode 775 on 3.1.3, 755 on 3.1.6), hence the passwd bind mount in [dropbear.md](dropbear.md). Password: md5crypt hash in `/etc/shadow` (plaintext unknown) | `3/dump/etc/passwd`, `shadow` |
 
 The boot hook that runs on every boot is `/mnt/sdcard/lp_app.sh`. `/oem/usr/bin/RkLunch.sh` copies it to `/tmp/lp_app.sh` and runs it, unless `/mnt/sdcard/lp_stop` exists. Your repo has three variants of this hook: `sdcard/`, `sdcard_rsync/`, and `sdcard_no_rsync/`. `sdcard_rsync` and `sdcard_no_rsync` end by running `sync_loop.sh` (rclone), which kills `lp_app` while it syncs. The sshd started here is a separate daemon and is not affected by that.
 
@@ -184,7 +184,17 @@ Scripts and text files (for example `start-sshd.sh`) are pasted the same way as 
 
 ## Rebooting
 
-`reboot` from an ssh session did not restart the camera in testing: 25 s later the old uptime and the old lighttpd process were still there. The probable cause is that busybox init does not act on the reboot signal while its sysinit actions are still running, and `/etc/init.d/rcS` never finishes because it ends in `lp_app.sh` -> `sync_loop.sh`. This was not confirmed in the busybox source. Use `sync; reboot -f` (equivalent to a power cycle, with no clean unmount) or power-cycle the camera.
+busybox init (v1.27.2) acts on a reboot request only after its sysinit actions have finished. `RkLunch.sh` runs
+`/mnt/sdcard/lp_app.sh` in the foreground from `/etc/init.d/rcS`, so a hook whose last line never returns
+(`/tmp/sync_loop.sh` or `lp_app ...` without `&`) keeps rcS running: plain `reboot` then does nothing, and
+`reboot recovery` (firmware updates from the card or by `lp_app`) hangs too. Confirmed on 2026-11-22: killing
+`sync_loop.sh` let a pending `reboot recovery` fire at once.
+
+Fix: end the hook in the background, `/tmp/sync_loop.sh &` (or `lp_app --noshell --log2file /mnt/sdcard/logs &`),
+as the stock `RkLunch.sh` does with `lp_app --noshell &`. With that, plain `reboot` works, but it does not stop
+`lp_app` or unmount the card first: the next boot logged `FAT-fs (mmcblk1p1): Volume was not properly unmounted`.
+Use `task buddy:reboot` (`safe-reboot.sh`: stops `lp_app`, unmounts the card, then `reboot -f`) for a clean
+reboot. `sync; reboot -f` works with any hook but is equivalent to a power cycle, with no clean unmount.
 
 ## Persistence and memory
 
